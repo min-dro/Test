@@ -1,0 +1,76 @@
+name: Deploy JAR
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1단계 : 내 소스코드를 빌드용 컴퓨터로 내보내기 (Checkout)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2단계 : 빌드용 컴퓨터에 JDK21 설치 (빌드 시 필요, 개발 때 썼던 버전과 맞추기)
+      - name: Set up JDK21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # 3단계 : Maven 으로 JAR 빌드
+      - name: Build JAR with Maven
+        run: mvn clean package -DskipTests
+
+      # 4단계 : JAR 를 EC2 로 전송 (파일 전송 시에는 scp 명령문 이용)
+      - name: Copy JAR to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}         # 어디로 보낼건지
+          username: ubuntu
+          key: ${{ secrets.EC2_KEY }}           # 비밀키 정보
+          source: "target/*.jar"                # 전송할 파일 정보
+          target: "/home/ubuntu/upload"         # 파일이 저장될 도착지 경로
+                                                # /home/ubuntu/upload/target/xxx.jar
+          strip_components: 1                   # 폴더를 한겹 빠져나오겠다.
+                                                # /home/ubuntu/upload/xxx.jar
+
+      # 5단계 : EC2 접속해서 (ssh 명령문 이용) 환경변수 셋팅 후 JAR 실행
+      - name: Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}         # 어디로 접속할건지
+          username: ubuntu
+          key: ${{ secrets.EC2_KEY }}           # 비밀키 정보
+
+          script: |
+
+            # 1) 올라온 jar 파일명을 myweb.jar 로 변경
+            sudo mv /home/ubuntu/upload/*.jar /home/ubuntu/upload/myweb.jar
+
+            # 2) 실행용 폴더로 복사
+            sudo mkdir -p /home/ubuntu/app
+            sudo cp /home/ubuntu/upload/myweb.jar /home/ubuntu/app/myweb.jar
+
+            # 3) upload 폴더 정리
+            sudo rm -f /home/ubuntu/upload/*.jar
+
+            # 4) 실행 폴더로 이동
+            sudo cd /home/ubuntu/app
+
+            # 5) 기존에 돌던 프로세스 종료
+            if [ -f myweb.pid ]; then
+              kill "$(cat myweb.pid)" 2>/dev/null || true
+              sleep 3
+            fi
+
+            # 6) 환경변수 셋팅
+            export RDS_HOST='${{ secrets.RDS_HOST }}'
+            export DB_USERNAME='${{ secrets.DB_USERNAME }}'
+            export DB_PASSWORD='${{ secrets.DB_PASSWORD }}'
+
+            # 7) jar 실행
+            setsid nohup java -jar /home/ubuntu/app/myweb.jar > log.txt 2>&1 < /dev/null &
